@@ -1,0 +1,34 @@
+# 构建产物
+build/
+*.apk
+*.aab
+*.jks
+*.keystore
+classes/
+dex/
+gen/
+
+# 中间文件
+_c.js
+_c.js.map
+*.log
+*.class
+
+# 运行期数据（可能含账号与个人记录）
+creds*.json
+my_lib.json
+history.json
+blacklist.json
+search_cache.json
+group_pool.json
+cache/
+downloads/
+*.ts
+*.mp4
+
+# 系统
+Thumbs.db
+desktop.ini
+.DS_Store
+__pycache__/
+*.pyc
