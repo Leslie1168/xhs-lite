@@ -219,6 +219,98 @@ public class MainActivity extends Activity {
 
     static final String ALBUM = "黄书Lite";
     static final String RELATIVE = "Movies/" + ALBUM;
+    static final String IMAGE_RELATIVE = "Pictures/" + ALBUM;
+
+    static boolean isImageBytes(byte[] raw) {
+        if (raw == null || raw.length < 16) return false;
+        try {
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            o.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(raw, 0, raw.length, o);
+            return o.outWidth > 0 && o.outHeight > 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 原图 CDN 与缩略图共用 AES/ECB/NoPadding；只接受解密后真实可解码的数据。 */
+    byte[] normalizeImage(byte[] raw, String url) {
+        if (raw == null || raw.length == 0) return null;
+        byte[] candidate = raw;
+        boolean encryptedCdn = url != null && (url.contains("codstatic/") || url.contains("/static/vod/"));
+        if (encryptedCdn || !isImageBytes(candidate)) {
+            try {
+                byte[] dec = Net.ecbDec(raw);
+                if (isImageBytes(dec)) candidate = dec;
+                else if (encryptedCdn) {
+                    dbg("image decrypt invalid bytes=" + dec.length + " url=" + url);
+                    return null;
+                }
+            } catch (Exception e) {
+                if (encryptedCdn) {
+                    dbg("image decrypt error=" + e + " url=" + url);
+                    return null;
+                }
+            }
+        }
+        if (!isImageBytes(candidate)) {
+            dbg("image invalid bytes=" + raw.length + " url=" + url);
+            return null;
+        }
+        try {
+            Bitmap bm = BitmapFactory.decodeByteArray(candidate, 0, candidate.length);
+            if (bm == null) return null;
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            bm.compress(Bitmap.CompressFormat.JPEG, 96, out);
+            bm.recycle();
+            dbg("image decoded bytes=" + candidate.length + " size=" + out.size() + " url=" + url);
+            return out.toByteArray();
+        } catch (Exception e) {
+            dbg("image decode error=" + e + " url=" + url);
+            return null;
+        }
+    }
+
+    /** 把图片原始字节写入系统相册 Pictures/黄书Lite */
+    boolean saveImageToGallery(byte[] raw, String displayName, String mime) {
+        if (raw == null || raw.length == 0) return false;
+        Uri uri = null;
+        try {
+            ContentValues v = new ContentValues();
+            v.put(MediaStore.Images.Media.DISPLAY_NAME, displayName);
+            v.put(MediaStore.Images.Media.MIME_TYPE, mime);
+            if (Build.VERSION.SDK_INT >= 29) {
+                v.put(MediaStore.Images.Media.RELATIVE_PATH, IMAGE_RELATIVE);
+                v.put(MediaStore.Images.Media.IS_PENDING, 1);
+            }
+            uri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
+            if (uri == null) return false;
+            OutputStream os = getContentResolver().openOutputStream(uri);
+            os.write(raw);
+            os.close();
+            if (Build.VERSION.SDK_INT >= 29) {
+                ContentValues done = new ContentValues();
+                done.put(MediaStore.Images.Media.IS_PENDING, 0);
+                getContentResolver().update(uri, done, null, null);
+            }
+            dbg("image gallery ok " + displayName);
+            return true;
+        } catch (Exception e) {
+            dbg("image gallery EX " + e);
+            if (uri != null) {
+                try { getContentResolver().delete(uri, null, null); } catch (Exception ignored) {}
+            }
+            return false;
+        }
+    }
+
+    String imageName(String title, int index, String url) {
+        String base = title == null ? "图文" : title.replaceAll("[\\\\/:*?\\\"<>|]", "_").trim();
+        if (base.length() == 0) base = "图文";
+        String lower = url == null ? "" : url.toLowerCase(Locale.US);
+        String ext = lower.contains(".png") ? ".png" : (lower.contains(".webp") ? ".webp" : ".jpg");
+        return base + "_" + index + ext;
+    }
 
     /** 把 mp4 塞进系统相册 Movies/黄书Lite，图库和文件管理都能直接看到 */
     boolean saveToGallery(File src, String displayName) {
@@ -281,6 +373,31 @@ public class MainActivity extends Activity {
         return null;
     }
 
+    /** 按文件名找 Pictures/黄书Lite 里的图片 */
+    Uri findImage(String name) {
+        Cursor c = null;
+        try {
+            String sel, arg;
+            if (Build.VERSION.SDK_INT >= 29) {
+                sel = MediaStore.Images.Media.DISPLAY_NAME + "=? AND "
+                        + MediaStore.Images.Media.RELATIVE_PATH + " LIKE ?";
+                arg = IMAGE_RELATIVE + "%";
+            } else {
+                sel = MediaStore.Images.Media.DISPLAY_NAME + "=? AND "
+                        + MediaStore.Images.Media.DATA + " LIKE ?";
+                arg = "%/" + IMAGE_RELATIVE + "/%";
+            }
+            c = getContentResolver().query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    new String[]{MediaStore.Images.Media._ID}, sel,
+                    new String[]{name, arg}, null);
+            if (c != null && c.moveToFirst()) {
+                return ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, c.getLong(0));
+            }
+        } catch (Exception e) { dbg("findImage EX " + e); }
+        finally { if (c != null) c.close(); }
+        return null;
+    }
+
     /** 本地服务路由：/ → index.html，/t/<id> → 缩略图，/dl/<name> → 下载的文件 */
     Object[] serve(String path) {
         Log.i("XHSLITE", "serve " + path);
@@ -302,6 +419,11 @@ public class MainActivity extends Activity {
                 if (u != null) {
                     InputStream in = getContentResolver().openInputStream(u);
                     return new Object[]{"video/mp4", bytesOf(in)};
+                }
+                Uri iu = findImage(nm);
+                if (iu != null) {
+                    InputStream in = getContentResolver().openInputStream(iu);
+                    return new Object[]{mimeOf(nm), bytesOf(in)};
                 }
                 File f = new File(dlDir, nm);
                 String root = dlDir.getCanonicalPath();
@@ -663,48 +785,43 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String dlGet() {
             JSONArray a = new JSONArray();
+            queryDownloads(a, false);
+            queryDownloads(a, true);
+            return a.toString();
+        }
+
+        void queryDownloads(JSONArray out, boolean images) {
             Cursor c = null;
             try {
-                String sel = null, order;
-                String[] args = null;
-                if (Build.VERSION.SDK_INT >= 29) {
-                    sel = MediaStore.Video.Media.RELATIVE_PATH + " LIKE ?";
-                    args = new String[]{RELATIVE + "%"};
-                } else {
-                    sel = MediaStore.Video.Media.DATA + " LIKE ?";
-                    args = new String[]{"%/" + RELATIVE + "/%"};
-                }
-                order = MediaStore.Video.Media.DATE_ADDED + " DESC";
-                c = getContentResolver().query(MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                        new String[]{MediaStore.Video.Media.DISPLAY_NAME,
-                                MediaStore.Video.Media.SIZE,
-                                MediaStore.Video.Media.DATE_ADDED},
-                        sel, args, order);
+                Uri collection = images ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                        : MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
+                String nameCol = images ? MediaStore.Images.Media.DISPLAY_NAME : MediaStore.Video.Media.DISPLAY_NAME;
+                String sizeCol = images ? MediaStore.Images.Media.SIZE : MediaStore.Video.Media.SIZE;
+                String dateCol = images ? MediaStore.Images.Media.DATE_ADDED : MediaStore.Video.Media.DATE_ADDED;
+                String pathCol = Build.VERSION.SDK_INT >= 29
+                        ? (images ? MediaStore.Images.Media.RELATIVE_PATH : MediaStore.Video.Media.RELATIVE_PATH)
+                        : (images ? MediaStore.Images.Media.DATA : MediaStore.Video.Media.DATA);
+                String path = images ? IMAGE_RELATIVE : RELATIVE;
+                String sel = pathCol + " LIKE ?";
+                String arg = Build.VERSION.SDK_INT >= 29 ? path + "%" : "%/" + path + "/%";
+                c = getContentResolver().query(collection,
+                        new String[]{nameCol, sizeCol, dateCol}, sel, new String[]{arg}, dateCol + " DESC");
                 while (c != null && c.moveToNext()) {
                     String nm = c.getString(0);
                     if (nm == null) continue;
                     JSONObject o = new JSONObject();
-                    o.put("name", nm);
-                    o.put("size", c.getLong(1));
-                    o.put("ts", c.getLong(2));
+                    o.put("name", nm); o.put("size", c.getLong(1)); o.put("ts", c.getLong(2));
+                    o.put("type", images ? "image" : "video");
                     String base = nm;
                     int dot = base.lastIndexOf('.');
                     if (dot > 0) base = base.substring(0, dot);
                     int us = base.indexOf('_');
-                    if (us > 0) {
-                        o.put("id", base.substring(0, us));
-                        o.put("title", base.substring(us + 1));
-                    } else {
-                        o.put("id", "");
-                        o.put("title", base);
-                    }
-                    a.put(o);
+                    if (us > 0) { o.put("id", base.substring(0, us)); o.put("title", base.substring(us + 1)); }
+                    else { o.put("id", ""); o.put("title", base); }
+                    out.put(o);
                 }
-            } catch (Exception ig) {
-            } finally {
-                if (c != null) c.close();
-            }
-            return a.toString();
+            } catch (Exception e) { dbg("queryDownloads EX images=" + images + " " + e); }
+            finally { if (c != null) c.close(); }
         }
 
         @JavascriptInterface
@@ -712,20 +829,36 @@ public class MainActivity extends Activity {
             try {
                 String nm = new File(name).getName();
                 Uri u = findVideo(nm);
-                if (u != null) {
-                    int n = getContentResolver().delete(u, null, null);
-                    if (n > 0) return true;
-                }
+                if (u == null) u = findImage(nm);
+                if (u != null) return getContentResolver().delete(u, null, null) > 0;
                 File f = new File(dlDir, nm);
                 return f.exists() && f.delete();
-            } catch (Exception e) {
-                return false;
-            }
+            } catch (Exception e) { return false; }
         }
 
         @JavascriptInterface
         public String dlPath(String name) {
             return "https://app.local/dl/" + URLEncoder.encode(name).replace("+", "%20");
+        }
+
+        @JavascriptInterface
+        public void imageSave(final String url, final String title, final int index) {
+            pool.execute(new Runnable() {
+                public void run() {
+                    byte[] raw = httpGet(url);
+                    byte[] image = normalizeImage(raw, url);
+                    String mime = "image/jpeg";
+                    boolean ok = saveImageToGallery(image, imageName(title, index, url), mime);
+                    dbg("image save raw=" + (raw == null ? 0 : raw.length) + " normalized=" + (image == null ? 0 : image.length) + " url=" + url);
+                    final String msg = ok ? "图片已保存" : "图片保存失败";
+                    runOnUiThread(new Runnable() {
+                        public void run() {
+                            android.widget.Toast.makeText(MainActivity.this, msg,
+                                    android.widget.Toast.LENGTH_SHORT).show();
+                        }
+                    });
+                }
+            });
         }
 
         @JavascriptInterface

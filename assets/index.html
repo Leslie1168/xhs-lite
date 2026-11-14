@@ -555,6 +555,7 @@ body.app #booterr{background:var(--bg)}
         </div>
         <div class="scroll" id="sc-search" style="padding-top:12px">
           <div class="grid" id="g-search"></div>
+          <div id="search-more" style="grid-column:1/-1;text-align:center;color:#5f5f6e;font-size:12px;padding:18px 0 28px;display:none"></div>
         </div>
       </section>
 
@@ -694,16 +695,6 @@ body.app #booterr{background:var(--bg)}
               <div class="mrow" id="row-hist" style="cursor:pointer">
                 <div class="ic"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg></div>
                 <div class="t">播放历史</div><div class="h" id="c-hist">0</div>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#454552" stroke-width="2.4" stroke-linecap="round"><path d="m9 6 6 6-6 6"/></svg>
-              </div>
-              <div class="mrow">
-                <div class="ic"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1"/></svg></div>
-                <div class="t">播放设置</div>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#454552" stroke-width="2.4" stroke-linecap="round"><path d="m9 6 6 6-6 6"/></svg>
-              </div>
-              <div class="mrow">
-                <div class="ic"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg></div>
-                <div class="t">黑名单</div><div class="h">1 人</div>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#454552" stroke-width="2.4" stroke-linecap="round"><path d="m9 6 6 6-6 6"/></svg>
               </div>
               <div class="mrow" id="row-logout" style="cursor:pointer">
@@ -885,50 +876,105 @@ function shuffle(a){
 }
 
 /* ================= 首页流 ================= */
+let HOME_SEEN = {};
+let HOME_SEEN_ORDER = [];
+let HOME_PAGE_POOL = [];
+let HOME_MORE_BUSY = false;
+function markHomeSeen(id){
+  const k = String(id);
+  if(HOME_SEEN[k]) return;
+  HOME_SEEN[k] = 1; HOME_SEEN_ORDER.push(k);
+  if(HOME_SEEN_ORDER.length > 600){
+    const old = HOME_SEEN_ORDER.shift(); delete HOME_SEEN[old];
+  }
+}
+function nextDiscoverPages(count){
+  if(!HOME_PAGE_POOL.length) HOME_PAGE_POOL = shuffle(Array.from({length:12}, (_,i)=>i+1));
+  const pages = [];
+  while(pages.length < count){
+    if(!HOME_PAGE_POOL.length) HOME_PAGE_POOL = shuffle(Array.from({length:12}, (_,i)=>i+1));
+    pages.push(HOME_PAGE_POOL.pop());
+  }
+  return pages;
+}
+function feedJobs(){
+  const pages = nextDiscoverPages(6);
+  const jobs = pages.map(p=>["v2/home/discover-note", {page:p}]);
+  jobs.push(["v2/home/vip-note", {page:1}]);
+  jobs.push(["v2/home/nearby-note", {page:1}]);
+  return shuffle(jobs);
+}
 async function buildFeed(n){
-  const out = [], seen = {};
-  const jobs = [];
-  for(let p = 1; p <= 3; p++) jobs.push(["v2/home/discover-note", {page: p}]);
-  jobs.push(["v2/home/vip-note", {page: 1}]);
-  jobs.push(["v2/home/nearby-note", {page: 1}]);
-  shuffle(jobs);
-  for(const job of jobs){
-    if(out.length >= Math.max(n, 30)) break;
+  const target = Math.max(n, 30), out = [], responseSeen = {};
+  const jobs = feedJobs();
+  for(let ji=0; ji<jobs.length; ji++){
+    if(out.length >= target) break;
+    const job = jobs[ji];
     let r;
     try{ r = await call(job[0], job[1]); }catch(e){ continue; }
     if(!r || r.result !== 1) continue;
     const tmp = [];
-    flat(r.data, seen, tmp);
+    flat(r.data, responseSeen, tmp);
     for(const it of tmp){
-      if(it.gid) continue;
-      if(blHas(it.uid)) continue;
-      out.push(it);
+      const id = String(it.id);
+      if(it.gid || blHas(it.uid) || HOME_SEEN[id]) continue;
+      markHomeSeen(id); out.push(it);
+    }
+  }
+  if(out.length < Math.max(6, n / 2)){
+    for(const job of feedJobs()){
+      if(out.length >= target) break;
+      let r; try{ r = await call(job[0], job[1]); }catch(e){ continue; }
+      if(!r || r.result !== 1) continue;
+      const tmp = []; flat(r.data, responseSeen, tmp);
+      for(const it of tmp){
+        const id = String(it.id);
+        if(it.gid || blHas(it.uid) || HOME_SEEN[id]) continue;
+        markHomeSeen(id); out.push(it);
+      }
     }
   }
   return out;
 }
 
 /* ================= 搜索 ================= */
-async function doSearch(q, pn){
-  const out = [], seen = {};
-  const tries = [
-    {q: q, note_sort: 0, note_type: 2, category_id: 0, page: pn || 1},
-    {q: q, note_sort: 0, note_type: 1, category_id: 0, page: 1}
-  ];
-  for(const t of tries){
-    if(out.length >= 40) break;
+async function doSearch(q, pn, opts){
+  opts = opts || {};
+  const page = Math.max(1, Number(pn || 1));
+  const out = [], mergedSeen = {};
+  const types = opts.type === 1 ? [1] : opts.type === 2 ? [2] : [2, 1];
+  if(opts.meta && !opts.meta.pages) opts.meta.pages = {};
+  for(const nt of types){
     let r;
-    try{ r = await call("v2/search/note-list", t); }catch(e){ continue; }
-    if(!r || r.result !== 1) continue;
-    const tmp = [];
-    flat(r.data, seen, tmp);
-    for(const it of tmp){
-      if(it.gid) continue;
-      if(blHas(it.uid)) continue;
+    try{
+      r = await call("v2/search/note-list", {
+        q: q, note_sort: 0, note_type: nt, category_id: 0, page: page
+      });
+    }catch(e){
+      if(opts.meta) opts.meta.pages[nt] = {ok:false, error:String(e.message||e)};
+      continue;
+    }
+    if(!r || r.result !== 1){
+      if(opts.meta) opts.meta.pages[nt] = {ok:false, error:(r && r.message) || "接口返回失败"};
+      continue;
+    }
+    const rawItems = [];
+    flat(r.data, {}, rawItems);
+    const signature = searchPageSignature(rawItems);
+    for(const it of rawItems){
+      const id = String(it.id);
+      if(mergedSeen[id]) continue;
+      mergedSeen[id] = 1;
+      if(it.gid || blHas(it.uid)) continue;
       out.push(it);
     }
+    if(opts.meta) opts.meta.pages[nt] = {ok:true, rawCount:rawItems.length, signature:signature};
   }
   return out;
+}
+
+async function searchMore(q, page, type, meta){
+  return doSearch(q, page, {type: type, meta: meta});
 }
 
 /* ================= 作者主页 ================= */
@@ -1056,15 +1102,24 @@ function histPost(it, pos, dur){
   }catch(e){}
 }
 
-/* 下载：先问 note/view 要地址，再交给 Java 拉片 */
+/* 下载：先问 note/view 要地址；图文逐张交给 Java 写入 Pictures/黄书Lite */
 async function dlStart(id){
   let r;
   try{ r = await call("v2/note/view", {note_id: Number(id)}); }
   catch(e){ toast("拿不到地址"); return {ok: 0}; }
   const d = (r && r.data) || {};
+  if(d.group_id > 0){ toast("粉丝团内容要先买"); return {ok: 0}; }
+  const imgs = Array.isArray(d.note_image_list)
+    ? d.note_image_list.map(x=>x && (x.image_url || x.url) || x).filter(Boolean) : [];
+  if(imgs.length){
+    if(!HAS_NATIVE || !Native.imageSave){ toast("这个版本还不支持图文保存"); return {ok: 0}; }
+    const title = String(d.note_title || "图文_" + id);
+    imgs.forEach((url, i)=>{ try{ Native.imageSave(String(url), title, i + 1); }catch(e){} });
+    toast("已保存 " + imgs.length + " 张图片");
+    return {ok: 1, count: imgs.length};
+  }
   const media = d.note_media_url || "";
   if(!media){ toast("这条没有可下载的源"); return {ok: 0}; }
-  if(d.group_id > 0){ toast("粉丝团内容要先买"); return {ok: 0}; }
   if(!HAS_NATIVE || !Native.dlStart){ toast("这个版本还不支持下载"); return {ok: 0}; }
   try{
     Native.dlStart(String(id), String(d.note_title || ""), media);
@@ -1172,65 +1227,106 @@ async function loadFeed(n=24){
   }
 }
 
-async function loadSearch(kw){
+let HOME_MORE_TIMER = null;
+async function loadHomeMore(){
+  const active = document.querySelector('.view.on');
+  if(HOME_MORE_BUSY || !active || active.id !== 'v-home') return;
+  HOME_MORE_BUSY = true;
+  try{
+    const items = await buildFeed(24);
+    const g = $("#g-home");
+    items.forEach((it,i)=>{ const c=cell(it,g); c.style.animationDelay=(i*18)+"ms"; });
+    if(items.length) FEED = FEED.concat(items);
+  } finally { HOME_MORE_BUSY = false; }
+}
+$("#sc-home").addEventListener("scroll", ()=>{
+  const sc = $("#sc-home");
+  if(sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 420) loadHomeMore();
+}, {passive:true});
+
+let SEARCH_STATE = {kw:"", pages:{2:1,1:1}, busy:false, done:{2:false,1:false}, seen:{}, pagesSeen:{2:{},1:{}}};
+function resetSearchState(kw){
+  SEARCH_STATE = {kw:kw, pages:{2:1,1:1}, busy:false, done:{2:false,1:false}, seen:{}, pagesSeen:{2:{},1:{}}};
+}
+function searchAppend(items){
   const g = $("#g-search");
-  const vs = $("#v-search");
-  vs.classList.add("searching");
-  const firstPaint = !g.children.length;
-  if(firstPaint){
-    g.innerHTML = Array.from({length:6}, ()=>'<div class="skel"></div>').join("");
-  }else{
-    // 已有结果时不清空，只在最上面压一条加载条，避免闪
-    let bar = g.querySelector(".sbar");
-    if(!bar){
-      bar = document.createElement("div");
-      bar.className = "sbar";
-      bar.innerHTML = '<i class="spin"></i> 搜索「'+esc(kw)+'」…';
-      g.insertBefore(bar, g.firstChild);
-    }else{
-      bar.innerHTML = '<i class="spin"></i> 搜索「'+esc(kw)+'」…';
-    }
+  let added = 0;
+  for(const it of (items || [])){
+    const id = String(it.id);
+    if(SEARCH_STATE.seen[id]) continue;
+    SEARCH_STATE.seen[id] = 1;
+    const c = cell(it, g);
+    c.style.animationDelay = Math.min(added,24)*16 + "ms";
+    added++;
   }
-  let tries = 0, items = [], grow = false;
-  while(true){
-    tries++;
-    try{
-      const j = await jget("/api/search?q=" + encodeURIComponent(kw) + (tries>1?"&f=0":""));
-      items = j.items || [];
-      grow = !!j.grow;
-      if(items.length) paintSearch(items, kw);
-      if(!grow) break;
-      if(tries >= 8) break;
-      await new Promise(r=>setTimeout(r, 1400));
-    }catch(e){
-      if(tries >= 3){
-        g.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#5f5f6e;font-size:12.5px;padding:56px 0">搜索失败 · 后端没起</div>';
-        return;
+  return added;
+}
+function searchPageSignature(items){
+  return (items || []).map(it=>String(it.id)).sort().join(",");
+}
+function searchMsg(t){
+  const e = $("#search-more"); if(e){ e.textContent = t; e.style.display = "block"; }
+}
+async function loadSearch(kw){
+  const g = $("#g-search"), vs = $("#v-search");
+  resetSearchState(kw); vs.classList.add("searching");
+  g.innerHTML = Array.from({length:6}, ()=>'<div class="skel"></div>').join("");
+  searchMsg("正在搜索…");
+  try{
+    const meta = {};
+    const items = await doSearch(kw, 1, {meta:meta});
+    g.innerHTML = "";
+    const added = searchAppend(items);
+    for(const nt of [2,1]){
+      const info = meta.pages && meta.pages[nt];
+      if(!info || !info.ok) continue;
+      if(!info.rawCount || info.rawCount < 20 || SEARCH_STATE.pagesSeen[nt][info.signature]){
+        SEARCH_STATE.done[nt] = true;
+      } else {
+        SEARCH_STATE.pagesSeen[nt][info.signature] = 1;
       }
-      await new Promise(r=>setTimeout(r, 900));
     }
+    if(!added) searchMsg("「" + esc(kw) + "」没搜到东西");
+    else searchMsg("继续上滑加载更多");
+  }catch(e){
+    g.innerHTML = ""; searchMsg("搜索失败 · " + esc(String(e.message || e)));
   }
-  if(!items.length){
-    g.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#5f5f6e;font-size:12.5px;padding:56px 0">「'+esc(kw)+'」没搜到东西</div>';
-  }else{
-    paintSearch(items, kw);
-  }
+}
+let SEARCH_MORE_TIMER = null;
+async function loadSearchMore(){
+  if(SEARCH_STATE.busy || !SEARCH_STATE.kw) return;
+  const available = [2,1].filter(nt=>!SEARCH_STATE.done[nt]);
+  if(!available.length){ searchMsg("没有更多了"); return; }
+  SEARCH_STATE.busy = true; searchMsg("加载更多…");
+  try{
+    let total = 0;
+    for(const nt of available){
+      const pg = SEARCH_STATE.pages[nt] + 1;
+      const meta = {};
+      const items = await searchMore(SEARCH_STATE.kw, pg, nt, meta);
+      const info = meta.pages && meta.pages[nt];
+      if(!info || !info.ok) continue;
+      SEARCH_STATE.pages[nt] = pg;
+      if(!info.rawCount || info.rawCount < 20 || SEARCH_STATE.pagesSeen[nt][info.signature]){
+        SEARCH_STATE.done[nt] = true;
+      } else {
+        SEARCH_STATE.pagesSeen[nt][info.signature] = 1;
+      }
+      total += searchAppend(items);
+    }
+    searchMsg(total ? "继续上滑加载更多" : "没有更多了");
+  }catch(e){ searchMsg("加载失败，继续上滑重试"); }
+  finally{ SEARCH_STATE.busy = false; }
 }
 
 function paintSearch(items, kw){
-  const g = $("#g-search");
-  const keep = g.scrollTop;
-  g.innerHTML = "";
-  items.forEach((it,i)=>{
-    const c = cell(it, g);
-    c.style.animationDelay = Math.min(i,24)*16 + "ms";
-  });
-  g.scrollTop = keep;
+  resetSearchState(kw); $("#g-search").innerHTML = ""; searchAppend(items); searchMsg("继续上滑加载更多");
 }
 
 $("#sc-search").addEventListener("scroll", ()=>{
-  const vs = $("#v-search");
-  vs.classList.toggle("scrolled", $("#sc-search").scrollTop > 6);
+  const sc = $("#sc-search"), vs = $("#v-search");
+  vs.classList.toggle("scrolled", sc.scrollTop > 6);
+  if(sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 360) loadSearchMore();
 }, {passive:true});
 
 async function loadAuthor(uid, kw, name){
@@ -1265,6 +1361,8 @@ function pvReset(){
   try{ v.pause(); }catch(e){}
   v.removeAttribute("src"); try{ v.load(); }catch(e){}
   v.playbackRate = 1;
+  const img = $("#pimg");
+  if(img) img.style.display = "none";
 }
 
 function fmtT(s){
@@ -1318,6 +1416,17 @@ function playAt(i){
     try{
       const r = await call("v2/note/view", {note_id: Number(it.id)});
       const d = (r && r.data) || {};
+      const imgs = Array.isArray(d.note_image_list) ? d.note_image_list : [];
+      if(imgs.length){
+        it._images = imgs.map(x=>x && (x.image_url || x.url) || x).filter(Boolean);
+        it._imageIndex = 0;
+        v.classList.remove("live"); v.pause(); v.removeAttribute("src");
+        $("#pimg").style.display = "block";
+        thumbLoad($("#pimg"), it._images[0]);
+        $("#pload").style.display = "none";
+        toast("图文 " + it._images.length + " 张 · 左右滑动切换");
+        return;
+      }
       url = d.note_media_url || "";
       if(d.hd_duration) it.dur = Number(d.hd_duration);
       if(!it.title && d.note_title) it.title = d.note_title;
@@ -1494,10 +1603,35 @@ $("#btn-close").onclick = closePlayer;
   }, true);
 })();
 
+/* 图文：左右滑动切图，点击下载整组 */
+(function(){
+  const img = $("#pimg");
+  let sx = 0, sy = 0;
+  function move(dx){
+    if(!cur || !cur._images || cur._images.length < 2) return;
+    const n = cur._images.length;
+    cur._imageIndex = (cur._imageIndex + (dx < 0 ? 1 : -1) + n) % n;
+    thumbLoad(img, cur._images[cur._imageIndex]);
+    toast((cur._imageIndex + 1) + " / " + n);
+  }
+  img.addEventListener("touchstart", e=>{ const t=e.touches[0]; sx=t.clientX; sy=t.clientY; }, {passive:true});
+  img.addEventListener("touchend", e=>{ const t=e.changedTouches[0]; const dx=t.clientX-sx, dy=t.clientY-sy; if(Math.abs(dx)>50 && Math.abs(dx)>Math.abs(dy)*1.2) move(dx); }, {passive:true});
+  img.addEventListener("click", ()=>{
+    if(cur && cur._images && cur._images.length > 1) move(-1);
+  });
+})();
+
 $("#btn-pdl").onclick = () => {
   if(!cur) return;
+  if(cur._images && cur._images.length){
+    if(!HAS_NATIVE || !Native.imageSave) return toast("这个版本还不支持图文保存");
+    const title = String(cur.title || "图文_" + cur.id);
+    cur._images.forEach((url, i)=>{ try{ Native.imageSave(String(url), title, i + 1); }catch(e){} });
+    toast("已保存 " + cur._images.length + " 张图片");
+    return;
+  }
   toast("开始下载 · #" + cur.id);
-  jpost("/api/dl/" + cur.id).catch(()=>{});
+  dlStart(cur.id);
 };$("#pu").onclick = () => {
   const uid = cur && cur.uid;
   if(!uid) return toast("这条没有作者信息");
@@ -1832,10 +1966,22 @@ async function loadDlm(){
       d.querySelector("b").textContent = it.title || it.name;
       d.onclick = (e) => {
         if(e.target === d.querySelector(".del")) return;
+        const local = "https://app.local/dl/" + encodeURIComponent(it.name);
+        if(it.type === "image"){
+          const old = cur;
+          cur = {id: it.id || it.name, title: it.title || it.name,
+                 uid: null, uname: "", _images: [local], _imageIndex: 0};
+          PLAYLIST = [cur]; PIDX = 0;
+          $("#player").classList.add("on"); $("#nav").classList.add("dim");
+          pvReset(); const v = PV(); v.pause(); v.removeAttribute("src");
+          v.classList.remove("live"); $("#pimg").style.display = "block";
+          thumbLoad($("#pimg"), local); $("#pload").style.display = "none";
+          $("#pt").textContent = cur.title; $("#pun").textContent = "本地图片";
+          return;
+        }
         openPlayer({ id: it.id, title: it.title || it.name,
                      cover: thumbOf(it.id), dur: 0,
-                     uid: null, uname: "" }, null,
-                   "https://app.local/dl/" + encodeURIComponent(it.name));
+                     uid: null, uname: "" }, null, local);
       };
       d.querySelector(".del").onclick = (e) => {
         e.stopPropagation();
